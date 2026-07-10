@@ -1,0 +1,10 @@
+# The MVP runs on the Python standard library alone — nothing required here.
+# These are OPTIONAL quality/automation upgrades.
+
+# Auto-summarization via Claude API (enables `python -m src.cli autoanalyze`)
+anthropic>=0.40
+
+# Better semantic similarity than TF-IDF (SPECTER2, scientific-paper embeddings).
+# Heavy (pulls in torch). Only install if you want higher-quality neighbor search.
+# sentence-transformers>=3.0
+# torch

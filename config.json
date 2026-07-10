@@ -1,0 +1,34 @@
+{
+  "keywords": [
+    "cellular senescence",
+    "senescent cells",
+    "senolytic",
+    "senomorphic",
+    "geroscience",
+    "hallmarks of aging",
+    "biological aging",
+    "epigenetic clock",
+    "biological age",
+    "telomere attrition",
+    "cellular reprogramming",
+    "partial reprogramming",
+    "healthspan",
+    "lifespan extension",
+    "longevity",
+    "proteostasis",
+    "inflammaging",
+    "gerotherapeutic",
+    "stem cell exhaustion"
+  ],
+  "_keywords_note": "Focused on mechanistic aging biology. Bare 'aging'/'ageing' removed — they flooded the base with clinical geriatrics. Phrases are matched verbatim (PubMed [Title/Abstract], substring for bioRxiv).",
+  "sources": {
+    "pubmed": { "enabled": true, "email": "karin.sadovs@gmail.com", "api_key": null },
+    "europepmc": { "enabled": true },
+    "biorxiv": { "enabled": true, "servers": ["biorxiv", "medrxiv"], "max_pages": 8 },
+    "semanticscholar": { "enabled": true, "api_key": null }
+  },
+  "similarity": { "backend": "tfidf", "top_k": 5 },
+  "llm": { "model": "claude-sonnet-5" },
+  "paths": { "db": "data/longevity.db", "digests": "digests", "work": "data" },
+  "limits": { "backfill_days": 180, "max_per_source": 100, "run_days": 7 }
+}
