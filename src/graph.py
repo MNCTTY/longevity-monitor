@@ -1,165 +1,318 @@
-"""Интерактивная визуализация карты знаний (самодостаточный HTML).
+"""Читаемая визуализация карты знаний (самодостаточный HTML).
 
-Строит граф: узлы — теории (размер по числу статей, цвет по статусу
-established/contested/emerging/provisional) и посылки; рёбра — «мосты»
-теория↔теория (theory_relation) и связи теория↔посылка через общие статьи.
+Не «волосяной шар» из физики, а информационный дашборд, где каждое значение
+подписано:
+  - рейтинг теорий с дивержентными полосами поддержка(зелёная)/вызовы(красная);
+  - компактный круговой граф связей между теориями (мосты);
+  - блок открытых противоречий;
+  - посылки с динамической уверенностью (evidence vs seed).
 
-Рендер — force-directed на чистом SVG+JS (без внешних библиотек, CSP-safe:
-можно открыть локально или опубликовать как artifact). Вызывается из src.cli
-(команда graph). Данные встраиваются в HTML как JSON.
+Рендер — статический SVG+CSS (тема light/dark), без внешних зависимостей и без
+физики: позиции считаются здесь, в Python. Можно открыть локально или
+опубликовать как artifact. Вызывается из src.cli (команда graph).
 """
 import os
-import json
+import math
+import html
 import datetime
 
 from . import positioning
 
+# Семантические цвета статусов (одинаковые в обеих темах — это данные, не фон).
+STATUS_COLOR = {
+    "established": "#16a34a",
+    "contested": "#f59e0b",
+    "emerging": "#3b82f6",
+    "provisional": "#9ca3af",
+    "premise": "#a855f7",
+}
+STATUS_RU = {"established": "устоявшаяся", "contested": "спорная",
+             "emerging": "формирующаяся", "provisional": "черновая", "unlinked": "без связей"}
 
-def build_graph_data(con):
+
+def _e(s):
+    return html.escape(str(s if s is not None else ""))
+
+
+def build_data(con):
     positioning.refresh_scorecards(con)
-    nodes, links = [], []
+    positioning.refresh_ledger(con)
 
-    # Узлы-теории с хотя бы одной привязанной статьёй.
-    theo = {}
-    for r in con.execute(
-        "SELECT s.theory_id, s.name, s.status, s.support_w, s.challenge_w, s.n_papers, t.status AS node_status "
-        "FROM theory_scorecard s JOIN theories t ON t.theory_id=s.theory_id WHERE s.n_papers > 0"
-    ):
-        node_status = "provisional" if r["node_status"] == "provisional" else r["status"]
-        theo[r["theory_id"]] = True
-        nodes.append({
-            "id": r["theory_id"], "label": r["name"].replace("\n", " "), "type": "theory",
-            "group": node_status, "size": r["n_papers"],
-            "detail": f"теория · {r['status']} · статей {r['n_papers']} · "
-                      f"support {r['support_w']:.1f} / challenge {r['challenge_w']:.1f}",
-        })
+    theories = con.execute(
+        "SELECT s.theory_id, t.status AS node_status, s.name, s.status, s.support_w, s.challenge_w, "
+        "s.attention, s.n_papers FROM theory_scorecard s JOIN theories t ON t.theory_id=s.theory_id "
+        "WHERE s.n_papers > 0 ORDER BY s.support_w DESC, s.n_papers DESC"
+    ).fetchall()
 
-    # Узлы-посылки (с доказательной активностью или из seed).
-    for r in con.execute(
-        "SELECT pr.premise_id, pr.text, l.n_for, l.n_against, l.evidence_confidence "
-        "FROM premises pr LEFT JOIN premise_ledger l ON l.premise_id=pr.premise_id"
-    ):
-        nf, na = r["n_for"] or 0, r["n_against"] or 0
-        nodes.append({
-            "id": r["premise_id"], "label": r["text"][:60], "type": "premise",
-            "group": "premise", "size": 1 + nf + na,
-            "detail": f"посылка · за {nf} / против {na}" +
-                      (f" · evidence {r['evidence_confidence']:.1f}" if r["evidence_confidence"] is not None else ""),
-        })
-    valid = {n["id"] for n in nodes}
+    bridges = con.execute(
+        "SELECT src_theory_id, dst_theory_id, relation, weight FROM theory_relation "
+        "WHERE weight >= 1 ORDER BY weight DESC"
+    ).fetchall()
 
-    # Рёбра теория↔теория (мосты).
-    for r in con.execute("SELECT src_theory_id, dst_theory_id, relation, weight FROM theory_relation"):
-        if r["src_theory_id"] in valid and r["dst_theory_id"] in valid:
-            links.append({"source": r["src_theory_id"], "target": r["dst_theory_id"],
-                          "w": r["weight"] or 1, "kind": r["relation"]})
+    contradictions = con.execute(
+        "SELECT level, ref_label, for_papers, against_papers, strength FROM contradictions "
+        "WHERE status='open' ORDER BY strength DESC"
+    ).fetchall()
 
-    # Рёбра теория↔посылка через общие статьи.
-    for r in con.execute(
-        """SELECT pt.theory_id, pp.premise_id, COUNT(DISTINCT pt.paper_id) AS w
-           FROM paper_theory pt JOIN paper_premise pp ON pt.paper_id = pp.paper_id
-           WHERE (pt.status='active' OR pt.status IS NULL)
-           GROUP BY pt.theory_id, pp.premise_id"""):
-        if r["theory_id"] in valid and r["premise_id"] in valid:
-            links.append({"source": r["theory_id"], "target": r["premise_id"],
-                          "w": r["w"], "kind": "evidence"})
-    return {"nodes": nodes, "links": links}
+    premises = con.execute(
+        "SELECT text, seed_confidence, evidence_confidence, n_for, n_against, flag "
+        "FROM premise_ledger WHERE n_for>0 OR n_against>0 ORDER BY (n_for+n_against) DESC"
+    ).fetchall()
+
+    return theories, bridges, contradictions, premises
+
+
+def _title(con, ids_json):
+    import json
+    out = []
+    for pid in json.loads(ids_json or "[]"):
+        r = con.execute("SELECT title FROM papers WHERE paper_id=?", (pid,)).fetchone()
+        out.append((r["title"] if r and r["title"] else pid)[:60])
+    return out
+
+
+# ------------------------------------------------------------- компоненты ---
+def _theory_bars(theories):
+    """Дивержентные полосы: влево — вызовы (красное), вправо — поддержка (зелёное)."""
+    max_ev = max([1.0] + [(t["support_w"] or 0) + (t["challenge_w"] or 0) for t in theories])
+    rows = []
+    for t in theories[:18]:
+        sup, chal = t["support_w"] or 0, t["challenge_w"] or 0
+        node_status = "provisional" if t["node_status"] == "provisional" else t["status"]
+        col = STATUS_COLOR.get(node_status, "#3b82f6")
+        sup_pct = sup / max_ev * 50
+        chal_pct = chal / max_ev * 50
+        rows.append(f"""
+      <div class="row">
+        <div class="tname" title="{_e(t['name'])}">{_e(t['name'])}</div>
+        <div class="bar">
+          <div class="half left"><div class="fill chal" style="width:{chal_pct:.1f}%"></div></div>
+          <div class="axis"></div>
+          <div class="half right"><div class="fill sup" style="width:{sup_pct:.1f}%"></div></div>
+        </div>
+        <div class="nums"><span class="c">{chal:.1f}</span>&nbsp;/&nbsp;<span class="s">{sup:.1f}</span></div>
+        <div class="pill" style="--c:{col}">{_e(STATUS_RU.get(node_status, node_status))}</div>
+        <div class="pcount">{t['n_papers']}</div>
+      </div>""")
+    return "".join(rows)
+
+
+def _bridge_graph(bridges):
+    """Компактный круговой граф связей между теориями. Позиции считаем тут."""
+    if not bridges:
+        return "<p class='muted'>Пока нет накопленных связей между теориями.</p>"
+    # уникальные узлы, участвующие в мостах (ограничим, чтобы читалось)
+    deg = {}
+    for b in bridges:
+        deg[b["src_theory_id"]] = deg.get(b["src_theory_id"], 0) + 1
+        deg[b["dst_theory_id"]] = deg.get(b["dst_theory_id"], 0) + 1
+    node_ids = [n for n, _ in sorted(deg.items(), key=lambda kv: -kv[1])][:14]
+    idset = set(node_ids)
+    edges = [b for b in bridges if b["src_theory_id"] in idset and b["dst_theory_id"] in idset]
+    labels = {b["src_theory_id"]: b["src_theory_id"] for b in bridges}  # fallback
+    # имена из theory_id: берём часть после 'th:'
+    def nm(tid):
+        return tid.split("th:")[-1].replace("-", " ")
+    W, H, cx, cy, R = 680, 520, 340, 250, 185
+    pos = {}
+    n = len(node_ids)
+    for i, tid in enumerate(node_ids):
+        ang = -math.pi / 2 + 2 * math.pi * i / max(1, n)
+        pos[tid] = (cx + R * math.cos(ang), cy + R * math.sin(ang), math.cos(ang))
+    max_w = max([1] + [e["weight"] or 1 for e in edges])
+    svg = [f'<svg viewBox="0 0 {W} {H}" preserveAspectRatio="xMidYMid meet" class="bridgesvg">']
+    for e in edges:
+        x1, y1, _ = pos[e["src_theory_id"]]
+        x2, y2, _ = pos[e["dst_theory_id"]]
+        op = 0.25 + 0.5 * ((e["weight"] or 1) / max_w)
+        wdt = 1 + 2 * ((e["weight"] or 1) / max_w)
+        svg.append(f'<line x1="{x1:.0f}" y1="{y1:.0f}" x2="{x2:.0f}" y2="{y2:.0f}" '
+                   f'stroke="var(--edge)" stroke-width="{wdt:.1f}" stroke-opacity="{op:.2f}"/>')
+    for tid in node_ids:
+        x, y, cosang = pos[tid]
+        r = 5 + min(9, deg[tid] * 1.6)
+        anchor = "start" if cosang >= 0 else "end"
+        lx = x + (12 if cosang >= 0 else -12)
+        svg.append(f'<circle cx="{x:.0f}" cy="{y:.0f}" r="{r:.0f}" fill="var(--accent)" '
+                   f'stroke="var(--bg)" stroke-width="2"/>')
+        svg.append(f'<text x="{lx:.0f}" y="{y+3:.0f}" text-anchor="{anchor}" class="glabel">{_e(nm(tid))}</text>')
+    svg.append("</svg>")
+    return "".join(svg)
+
+
+def _contradictions(con, contradictions):
+    if not contradictions:
+        return "<p class='muted'>Открытых противоречий нет.</p>"
+    cards = []
+    for c in contradictions:
+        forp = _title(con, c["for_papers"])
+        againstp = _title(con, c["against_papers"])
+        lvl = "посылка" if c["level"] == "premise" else "теория"
+        fa = "".join(f"<li>{_e(x)}</li>" for x in forp) or "<li class='muted'>—</li>"
+        ag = "".join(f"<li>{_e(x)}</li>" for x in againstp) or "<li class='muted'>—</li>"
+        cards.append(f"""
+      <div class="ccard">
+        <div class="chead"><span class="ctag">{lvl}</span> {_e(c['ref_label'])}
+          <span class="cstr" title="сила противоречия 0..1">напряжённость {c['strength']:.2f}</span></div>
+        <div class="csides">
+          <div class="side for"><div class="slab">за ({len(forp)})</div><ul>{fa}</ul></div>
+          <div class="side ag"><div class="slab">против ({len(againstp)})</div><ul>{ag}</ul></div>
+        </div>
+      </div>""")
+    return "".join(cards)
+
+
+def _premises(premises):
+    if not premises:
+        return "<p class='muted'>Нет посылок с накопленными доказательствами.</p>"
+    rows = []
+    for p in premises[:12]:
+        ev = (p["evidence_confidence"] or 0) / 5 * 100
+        seed = (p["seed_confidence"] or 0) / 5 * 100
+        flag = ""
+        if p["flag"] == "under_revision":
+            flag = "<span class='flag'>под пересмотром</span>"
+        elif p["flag"] == "sign_flip":
+            flag = "<span class='flag flip'>смена знака</span>"
+        rows.append(f"""
+      <div class="prow">
+        <div class="ptext">{_e(p['text'])}{flag}</div>
+        <div class="pmeter" title="seed {p['seed_confidence']:.1f} → evidence {p['evidence_confidence']:.1f} (из 5)">
+          <div class="seedmark" style="left:{seed:.0f}%"></div>
+          <div class="pfill" style="width:{ev:.0f}%"></div>
+        </div>
+        <div class="pfa">за {p['n_for']} / против {p['n_against']}</div>
+      </div>""")
+    return "".join(rows)
 
 
 def render_html(con, out_dir):
     os.makedirs(out_dir, exist_ok=True)
-    data = build_graph_data(con)
+    theories, bridges, contradictions, premises = build_data(con)
     date = datetime.date.today().isoformat()
-    html = _TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False)).replace("__DATE__", date)
+    n_theory = len([t for t in theories])
+    n_contra = len(contradictions)
+    n_papers = con.execute("SELECT COUNT(DISTINCT paper_id) c FROM paper_theory "
+                           "WHERE source IN ('batch','auto-llm')").fetchone()["c"]
+
+    body = _TEMPLATE.format(
+        date=_e(date), n_theory=n_theory, n_papers=n_papers, n_contra=n_contra,
+        n_bridges=len(bridges),
+        theory_bars=_theory_bars(theories),
+        bridge_graph=_bridge_graph(bridges),
+        contradictions=_contradictions(con, contradictions),
+        premises=_premises(premises),
+    )
     path = os.path.join(out_dir, "graph.html")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(html)
-    return path, len(data["nodes"]), len(data["links"])
+        f.write(body)
+    return path, n_theory, len(bridges)
 
 
-# Самодостаточный фрагмент (style + div + script). Открывается локально и годится
-# как содержимое artifact (без <!doctype>/<html>/<head>/<body>).
 _TEMPLATE = r"""<style>
-  #kmap{font-family:system-ui,Segoe UI,Arial,sans-serif;background:#0f1419;color:#e6e6e6;
-        border-radius:10px;padding:12px;max-width:100%;box-sizing:border-box}
-  #kmap h2{margin:4px 6px 8px;font-size:16px;font-weight:600}
-  #kmap .legend{font-size:12px;margin:0 6px 8px;display:flex;flex-wrap:wrap;gap:12px;color:#b8c0cc}
-  #kmap .legend span{display:inline-flex;align-items:center;gap:5px}
-  #kmap .dot{width:11px;height:11px;border-radius:50%;display:inline-block}
-  #kmap svg{width:100%;height:70vh;min-height:420px;display:block;background:#0f1419;border-radius:8px;touch-action:none}
-  #kmap .tip{position:fixed;pointer-events:none;background:#1f2937;border:1px solid #374151;
-        color:#f3f4f6;font-size:12px;padding:6px 9px;border-radius:6px;max-width:320px;opacity:0;transition:opacity .1s;z-index:9}
-  #kmap text{font-size:10px;fill:#cbd5e1;pointer-events:none}
-  #kmap line{stroke:#3a4655}
+  :root{{
+    --bg:#ffffff; --panel:#f6f7f9; --ink:#1a1d21; --muted:#6b7280; --line:#e5e7eb;
+    --accent:#4f6bed; --edge:#94a3b8; --sup:#16a34a; --chal:#dc2626; --seed:#111827;
+  }}
+  @media (prefers-color-scheme:dark){{
+    :root{{ --bg:#0f1216; --panel:#171b21; --ink:#e8eaed; --muted:#9aa4b2; --line:#242a32;
+            --accent:#7c93f2; --edge:#5b6672; --seed:#e8eaed; }}
+  }}
+  :root[data-theme="light"]{{ --bg:#ffffff; --panel:#f6f7f9; --ink:#1a1d21; --muted:#6b7280;
+    --line:#e5e7eb; --accent:#4f6bed; --edge:#94a3b8; --seed:#111827; }}
+  :root[data-theme="dark"]{{ --bg:#0f1216; --panel:#171b21; --ink:#e8eaed; --muted:#9aa4b2;
+    --line:#242a32; --accent:#7c93f2; --edge:#5b6672; --seed:#e8eaed; }}
+
+  .km{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:var(--ink);
+       background:var(--bg);line-height:1.45;padding:20px;max-width:100%;box-sizing:border-box}}
+  .km *{{box-sizing:border-box}}
+  .km h1{{font-size:20px;margin:0 0 2px;font-weight:700;letter-spacing:-.01em}}
+  .km h2{{font-size:14px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+          margin:26px 0 12px;font-weight:600}}
+  .km .sub{{color:var(--muted);font-size:13px;margin:0 0 16px}}
+  .km .muted{{color:var(--muted);font-size:13px}}
+  .chips{{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0 4px}}
+  .chip{{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px}}
+  .chip b{{font-size:19px;display:block;font-variant-numeric:tabular-nums}}
+  .chip span{{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}}
+  .hint{{font-size:12px;color:var(--muted);margin:-4px 0 10px}}
+
+  /* Полосы теорий */
+  .row{{display:grid;grid-template-columns:190px 1fr 74px 108px 34px;align-items:center;gap:10px;
+        padding:5px 0;border-bottom:1px solid var(--line)}}
+  .tname{{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+  .bar{{display:flex;align-items:center;height:16px}}
+  .half{{width:50%;height:10px;display:flex}}
+  .half.left{{justify-content:flex-end}}
+  .fill{{height:100%;border-radius:3px}}
+  .fill.sup{{background:var(--sup)}}
+  .fill.chal{{background:var(--chal)}}
+  .axis{{width:1px;height:16px;background:var(--line)}}
+  .nums{{font-size:12px;text-align:right;font-variant-numeric:tabular-nums}}
+  .nums .c{{color:var(--chal)}} .nums .s{{color:var(--sup)}}
+  .pill{{font-size:11px;color:#fff;background:var(--c);border-radius:20px;padding:2px 9px;
+         text-align:center;justify-self:start;white-space:nowrap}}
+  .pcount{{font-size:12px;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}}
+
+  /* Граф мостов */
+  .bridgesvg{{width:100%;height:auto;max-height:60vh;display:block;background:var(--panel);
+              border:1px solid var(--line);border-radius:10px}}
+  .glabel{{font-size:10.5px;fill:var(--ink);font-family:system-ui,sans-serif}}
+
+  /* Противоречия */
+  .ccard{{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:10px}}
+  .chead{{font-size:13.5px;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}}
+  .ctag{{font-size:11px;background:var(--accent);color:#fff;border-radius:5px;padding:1px 7px;font-weight:600}}
+  .cstr{{margin-left:auto;font-size:11px;color:var(--muted);font-weight:500}}
+  .csides{{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}}
+  .side{{border-radius:8px;padding:8px 10px;background:var(--bg);border:1px solid var(--line)}}
+  .slab{{font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;font-weight:600}}
+  .side.for .slab{{color:var(--sup)}} .side.ag .slab{{color:var(--chal)}}
+  .side ul{{margin:0;padding-left:16px;font-size:12px}} .side li{{margin:2px 0}}
+
+  /* Посылки */
+  .prow{{display:grid;grid-template-columns:1fr 180px 120px;align-items:center;gap:12px;
+         padding:6px 0;border-bottom:1px solid var(--line)}}
+  .ptext{{font-size:13px}}
+  .flag{{font-size:10px;background:var(--chal);color:#fff;border-radius:4px;padding:1px 6px;margin-left:6px}}
+  .flag.flip{{background:var(--accent)}}
+  .pmeter{{position:relative;height:9px;background:var(--line);border-radius:5px}}
+  .pfill{{position:absolute;left:0;top:0;height:100%;background:var(--accent);border-radius:5px}}
+  .seedmark{{position:absolute;top:-3px;width:2px;height:15px;background:var(--seed);opacity:.6}}
+  .pfa{{font-size:12px;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}}
+  .legend{{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--muted);margin:6px 0 2px}}
+  .legend span{{display:inline-flex;align-items:center;gap:6px}}
+  .dot{{width:10px;height:10px;border-radius:50%;display:inline-block}}
 </style>
-<div id="kmap">
-  <h2>Карта знаний по биологии старения — __DATE__</h2>
-  <div class="legend">
-    <span><i class="dot" style="background:#22c55e"></i>established</span>
-    <span><i class="dot" style="background:#f59e0b"></i>contested</span>
-    <span><i class="dot" style="background:#3b82f6"></i>emerging</span>
-    <span><i class="dot" style="background:#6b7280"></i>provisional</span>
-    <span><i class="dot" style="background:#a855f7"></i>посылка</span>
-    <span>линия — связь (мост / доказательство)</span>
+<div class="km">
+  <h1>Карта знаний по биологии старения</h1>
+  <p class="sub">Обновлено {date}. Статьи связаны с теориями старения и эмпирическими посылками; здесь — накопленный баланс доказательств.</p>
+  <div class="chips">
+    <div class="chip"><b>{n_theory}</b><span>теорий с доказательствами</span></div>
+    <div class="chip"><b>{n_papers}</b><span>статей позиционировано</span></div>
+    <div class="chip"><b>{n_bridges}</b><span>связей теория–теория</span></div>
+    <div class="chip"><b>{n_contra}</b><span>открытых противоречий</span></div>
   </div>
-  <svg viewBox="0 0 960 620" preserveAspectRatio="xMidYMid meet"></svg>
-  <div class="tip"></div>
-</div>
-<script>
-(function(){
-  var DATA = __DATA__;
-  var W=960,H=620, svg=document.querySelector('#kmap svg'), tip=document.querySelector('#kmap .tip');
-  var NS='http://www.w3.org/2000/svg';
-  var COL={established:'#22c55e',contested:'#f59e0b',emerging:'#3b82f6',provisional:'#6b7280',premise:'#a855f7'};
-  var nodes=DATA.nodes, links=DATA.links, byId={};
-  nodes.forEach(function(n,i){ n.x=W/2+Math.cos(i)*200*Math.random(); n.y=H/2+Math.sin(i)*200*Math.random();
-    n.vx=0; n.vy=0; n.r=(n.type==='theory'?5:4)+Math.sqrt(n.size)*2.4; byId[n.id]=n; });
-  links.forEach(function(l){ l.s=byId[l.source]; l.t=byId[l.target]; });
-  links=links.filter(function(l){return l.s&&l.t;});
-  // Простая force-модель (Fruchterman–Reingold-подобная).
-  var k=Math.sqrt(W*H/Math.max(1,nodes.length))*0.7;
-  function tick(temp){
-    for(var i=0;i<nodes.length;i++){var a=nodes[i];
-      for(var j=i+1;j<nodes.length;j++){var b=nodes[j];
-        var dx=a.x-b.x, dy=a.y-b.y, d=Math.sqrt(dx*dx+dy*dy)||0.01;
-        var f=k*k/d/d; a.vx+=dx*f; a.vy+=dy*f; b.vx-=dx*f; b.vy-=dy*f;}}
-    links.forEach(function(l){var dx=l.s.x-l.t.x, dy=l.s.y-l.t.y, d=Math.sqrt(dx*dx+dy*dy)||0.01;
-      var f=(d*d)/k/900*(1+(l.w||1)*0.15); var ux=dx/d*f, uy=dy/d*f;
-      l.s.vx-=ux; l.s.vy-=uy; l.t.vx+=ux; l.t.vy+=uy;});
-    nodes.forEach(function(n){ n.vx+=(W/2-n.x)*0.006; n.vy+=(H/2-n.y)*0.006;
-      if(n.fx==null){ n.x+=Math.max(-temp,Math.min(temp,n.vx)); n.y+=Math.max(-temp,Math.min(temp,n.vy)); }
-      n.vx*=0.85; n.vy*=0.85;
-      n.x=Math.max(n.r,Math.min(W-n.r,n.x)); n.y=Math.max(n.r,Math.min(H-n.r,n.y)); });
-  }
-  var t=18; for(var it=0;it<420;it++){ tick(t); t*=0.992; }  // прогрев до стабильной раскладки
-  // Отрисовка
-  var gL=document.createElementNS(NS,'g'), gN=document.createElementNS(NS,'g');
-  svg.appendChild(gL); svg.appendChild(gN);
-  var lineEls=links.map(function(l){var e=document.createElementNS(NS,'line');
-    e.setAttribute('stroke-width', Math.min(4,0.6+(l.w||1)*0.4));
-    e.setAttribute('stroke-opacity', l.kind==='evidence'?0.28:0.6);
-    if(l.kind!=='evidence') e.setAttribute('stroke','#8b98a8'); gL.appendChild(e); return e;});
-  var nodeEls=nodes.map(function(n){var g=document.createElementNS(NS,'g'); g.style.cursor='pointer';
-    var c=document.createElementNS(NS,'circle'); c.setAttribute('r',n.r);
-    c.setAttribute('fill',COL[n.group]||'#3b82f6'); c.setAttribute('stroke','#0f1419'); c.setAttribute('stroke-width',1.5);
-    g.appendChild(c);
-    if(n.type==='theory' && n.size>=3){var tx=document.createElementNS(NS,'text');
-      tx.setAttribute('text-anchor','middle'); tx.setAttribute('dy',-n.r-3);
-      tx.textContent=n.label.length>26?n.label.slice(0,25)+'…':n.label; g.appendChild(tx);}
-    g.addEventListener('mousemove',function(ev){tip.style.opacity=1; tip.style.left=(ev.clientX+12)+'px';
-      tip.style.top=(ev.clientY+12)+'px'; tip.innerHTML='<b>'+esc(n.label)+'</b><br>'+esc(n.detail);});
-    g.addEventListener('mouseleave',function(){tip.style.opacity=0;});
-    enableDrag(g,n); gN.appendChild(g); return g;});
-  function esc(s){return (s||'').replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
-  function draw(){ links.forEach(function(l,i){lineEls[i].setAttribute('x1',l.s.x);lineEls[i].setAttribute('y1',l.s.y);
-      lineEls[i].setAttribute('x2',l.t.x);lineEls[i].setAttribute('y2',l.t.y);});
-    nodes.forEach(function(n,i){nodeEls[i].setAttribute('transform','translate('+n.x+','+n.y+')');}); }
-  draw();
-  function enableDrag(g,n){var moving=false;
-    g.addEventListener('pointerdown',function(ev){moving=true; n.fx=n.x; g.setPointerCapture(ev.pointerId); ev.preventDefault();});
-    g.addEventListener('pointermove',function(ev){ if(!moving)return; var p=pt(ev); n.x=p.x; n.y=p.y; n.fx=p.x; n.fy=p.y;
-      for(var i=0;i<40;i++)tick(6); draw();});
-    g.addEventListener('pointerup',function(ev){moving=false; n.fx=null; n.fy=null;});}
-  function pt(ev){var r=svg.getBoundingClientRect(); return {x:(ev.clientX-r.left)/r.width*W, y:(ev.clientY-r.top)/r.height*H};}
-})();
-</script>"""
+
+  <h2>Теории по накопленным доказательствам</h2>
+  <div class="hint">Полоса: влево (красное) — сколько статей <b>оспаривают</b> теорию, вправо (зелёное) — <b>поддерживают</b> (с учётом уверенности статьи). Справа — статус и число статей.</div>
+  <div class="legend">
+    <span><i class="dot" style="background:#16a34a"></i>устоявшаяся</span>
+    <span><i class="dot" style="background:#f59e0b"></i>спорная</span>
+    <span><i class="dot" style="background:#3b82f6"></i>формирующаяся</span>
+    <span><i class="dot" style="background:#9ca3af"></i>черновая</span>
+  </div>
+  {theory_bars}
+
+  <h2>Связи между теориями</h2>
+  <div class="hint">Точки — теории (крупнее = больше связей), линии — статьи, обсуждающие обе теории сразу («мосты»). Толще линия — больше таких статей.</div>
+  {bridge_graph}
+
+  <h2>Открытые противоречия</h2>
+  <div class="hint">Статьи по одной посылке/теории с противоположными позициями. Напряжённость — насколько силы сторон сопоставимы (1.0 = поровну).</div>
+  {contradictions}
+
+  <h2>Посылки: уверенность</h2>
+  <div class="hint">Полоса — текущая уверенность по доказательствам (из 5). Вертикальная метка — исходная (seed) уверенность; расхождение = посылка сдвигается.</div>
+  {premises}
+</div>"""
