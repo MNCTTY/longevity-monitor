@@ -67,30 +67,44 @@ def render_knowledge_digest(con, out_dir):
     и открытые противоречия."""
     os.makedirs(out_dir, exist_ok=True)
     date = datetime.date.today().isoformat()
-    L = [f"# Knowledge map — {date}", ""]
+    L = [f"# Карта знаний — {date}", ""]
+
+    # Карты русских названий (COALESCE(name_ru, name) / text_ru).
+    tname = {r["theory_id"]: (r["name_ru"] or r["name"])
+             for r in con.execute("SELECT theory_id, name, name_ru FROM theories")}
+    pname = {r["premise_id"]: (r["text_ru"] or r["text"])
+             for r in con.execute("SELECT premise_id, text, text_ru FROM premises")}
+    STATUS_RU = {"established": "устоявшаяся", "contested": "спорная",
+                 "emerging": "формирующаяся", "provisional": "черновая", "unlinked": "без связей"}
 
     scored = con.execute(
-        "SELECT * FROM theory_scorecard WHERE support_w>0 OR challenge_w>0 ORDER BY net DESC, support_w DESC"
+        "SELECT s.*, COALESCE(t.name_ru, s.name) AS disp FROM theory_scorecard s "
+        "JOIN theories t ON t.theory_id=s.theory_id "
+        "WHERE s.support_w>0 OR s.challenge_w>0 ORDER BY s.net DESC, s.support_w DESC"
     ).fetchall()
     contested = [r for r in scored if r["status"] == "contested"]
-    L.append(f"**Theories with evidence:** {len(scored)} · **contested:** {len(contested)}")
+    L.append(f"**Теорий с доказательствами:** {len(scored)} · **спорных:** {len(contested)}")
     L.append("")
     L.append("## Теории по накопленным доказательствам")
     L.append("")
-    L.append("| Теория | Статус | support | challenge | статей |")
+    L.append("| Теория | Статус | поддержка | вызовы | статей |")
     L.append("|---|---|--:|--:|--:|")
     for r in scored:
-        L.append(f"| {r['name']} | {r['status']} | {r['support_w']:.1f} | {r['challenge_w']:.1f} | {r['n_papers']} |")
+        L.append(f"| {r['disp']} | {STATUS_RU.get(r['status'], r['status'])} | "
+                 f"{r['support_w']:.1f} | {r['challenge_w']:.1f} | {r['n_papers']} |")
     L.append("")
 
-    ledger = con.execute("SELECT * FROM premise_ledger WHERE flag!='' ORDER BY ABS(drift) DESC").fetchall()
+    ledger = con.execute(
+        "SELECT l.*, COALESCE(p2.text_ru, l.text) AS disp FROM premise_ledger l "
+        "JOIN premises p2 ON p2.premise_id=l.premise_id WHERE l.flag!='' ORDER BY ABS(l.drift) DESC"
+    ).fetchall()
     if ledger:
         L.append("## Посылки под пересмотром")
         L.append("")
         for r in ledger:
-            L.append(f"- **{r['text']}** — seed confidence {r['seed_confidence']:.1f} → "
-                     f"evidence {r['evidence_confidence']:.1f} (drift {r['drift']:+.1f}, "
-                     f"for {r['n_for']} / against {r['n_against']}) — _{r['flag']}_")
+            L.append(f"- **{r['disp']}** — seed-уверенность {r['seed_confidence']:.1f} → "
+                     f"по доказательствам {r['evidence_confidence']:.1f} (сдвиг {r['drift']:+.1f}, "
+                     f"за {r['n_for']} / против {r['n_against']}) — _{r['flag']}_")
         L.append("")
 
     contras = con.execute("SELECT * FROM contradictions WHERE status='open' ORDER BY strength DESC").fetchall()
@@ -99,22 +113,24 @@ def render_knowledge_digest(con, out_dir):
     for r in contras:
         fp = _titles(con, json.loads(r["for_papers"] or "[]"))
         ap = _titles(con, json.loads(r["against_papers"] or "[]"))
-        L.append(f"### [{r['level']}] {r['ref_label']}  · strength {r['strength']}")
+        lvl = "посылка" if r["level"] == "premise" else "теория"
+        label = (pname.get(r["ref_id"]) if r["level"] == "premise" else tname.get(r["ref_id"])) or r["ref_label"]
+        L.append(f"### [{lvl}] {label}  · напряжённость {r['strength']}")
         if fp:
             L.append(f"- **За ({len(fp)}):** " + "; ".join(fp))
         if ap:
             L.append(f"- **Против ({len(ap)}):** " + "; ".join(ap))
         L.append("")
 
-    provisional_t = con.execute("SELECT name FROM theories WHERE status='provisional'").fetchall()
-    provisional_p = con.execute("SELECT text FROM premises WHERE status='provisional'").fetchall()
+    provisional_t = con.execute("SELECT COALESCE(name_ru, name) AS disp FROM theories WHERE status='provisional'").fetchall()
+    provisional_p = con.execute("SELECT COALESCE(text_ru, text) AS disp FROM premises WHERE status='provisional'").fetchall()
     if provisional_t or provisional_p:
-        L.append("## Новые (provisional) узлы — ждут подтверждения/ревью")
+        L.append("## Новые (черновые) узлы — ждут подтверждения/ревью")
         L.append("")
         for r in provisional_t:
-            L.append(f"- теория: {r['name']}")
+            L.append(f"- теория: {r['disp']}")
         for r in provisional_p:
-            L.append(f"- посылка: {r['text'][:100]}")
+            L.append(f"- посылка: {r['disp'][:100]}")
         L.append("")
 
     path = os.path.join(out_dir, f"knowledge-map-{date}.md")

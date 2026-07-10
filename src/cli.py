@@ -20,7 +20,7 @@ import json
 import argparse
 import datetime
 
-from . import db, analysis, digest, knowledge, positioning, enrich, review, graph
+from . import db, analysis, digest, knowledge, positioning, enrich, review, graph, translations
 from .sources.pubmed import PubMedSource
 from .sources.europepmc import EuropePmcSource
 from .sources.biorxiv import BiorxivSource
@@ -320,6 +320,13 @@ def cmd_kg_stats(cfg, args):
     con.close()
 
 
+def cmd_translate(cfg, args):
+    con = db.connect(_dbpath(cfg))
+    s = translations.apply(con)
+    print(f"Переводы применены: теорий {s['theories']}, посылок {s['premises']}")
+    con.close()
+
+
 def cmd_graph(cfg, args):
     con = db.connect(_dbpath(cfg))
     path, nn, nl = graph.render_html(con, os.path.join(ROOT, cfg["paths"]["digests"]))
@@ -374,6 +381,7 @@ def main():
     scp = sub.add_parser("scorecard")
     scp.add_argument("theory", nargs="?")
     sub.add_parser("contradictions")
+    sub.add_parser("translate")
     sub.add_parser("digest")
     sub.add_parser("graph")
     sub.add_parser("stats")
@@ -394,7 +402,7 @@ def main():
         "autoposition": cmd_autoposition, "map-refresh": cmd_map_refresh,
         "review": cmd_review, "review-approve": cmd_review_approve, "review-reject": cmd_review_reject,
         "scorecard": cmd_scorecard, "contradictions": cmd_contradictions,
-        "digest": cmd_digest, "graph": cmd_graph, "stats": cmd_stats,
+        "translate": cmd_translate, "digest": cmd_digest, "graph": cmd_graph, "stats": cmd_stats,
     }
     handlers[args.cmd](cfg, args)
 

@@ -38,9 +38,11 @@ def build_data(con):
     positioning.refresh_scorecards(con)
     positioning.refresh_ledger(con)
 
+    # Везде берём русское название через COALESCE(name_ru, name) / COALESCE(text_ru, text).
     theories = con.execute(
-        "SELECT s.theory_id, t.status AS node_status, s.name, s.status, s.support_w, s.challenge_w, "
-        "s.attention, s.n_papers FROM theory_scorecard s JOIN theories t ON t.theory_id=s.theory_id "
+        "SELECT s.theory_id, t.status AS node_status, COALESCE(t.name_ru, s.name) AS name, "
+        "s.status, s.support_w, s.challenge_w, s.attention, s.n_papers "
+        "FROM theory_scorecard s JOIN theories t ON t.theory_id=s.theory_id "
         "WHERE s.n_papers > 0 ORDER BY s.support_w DESC, s.n_papers DESC"
     ).fetchall()
 
@@ -50,16 +52,22 @@ def build_data(con):
     ).fetchall()
 
     contradictions = con.execute(
-        "SELECT level, ref_label, for_papers, against_papers, strength FROM contradictions "
+        "SELECT level, ref_id, ref_label, for_papers, against_papers, strength FROM contradictions "
         "WHERE status='open' ORDER BY strength DESC"
     ).fetchall()
 
     premises = con.execute(
-        "SELECT text, seed_confidence, evidence_confidence, n_for, n_against, flag "
-        "FROM premise_ledger WHERE n_for>0 OR n_against>0 ORDER BY (n_for+n_against) DESC"
+        "SELECT COALESCE(p2.text_ru, l.text) AS text, l.seed_confidence, l.evidence_confidence, "
+        "l.n_for, l.n_against, l.flag FROM premise_ledger l JOIN premises p2 ON p2.premise_id=l.premise_id "
+        "WHERE l.n_for>0 OR l.n_against>0 ORDER BY (l.n_for+l.n_against) DESC"
     ).fetchall()
 
-    return theories, bridges, contradictions, premises
+    # id -> русское отображаемое имя (для графа мостов и меток противоречий)
+    tname = {r["theory_id"]: (r["name_ru"] or r["name"])
+             for r in con.execute("SELECT theory_id, name, name_ru FROM theories")}
+    pname = {r["premise_id"]: (r["text_ru"] or r["text"])
+             for r in con.execute("SELECT premise_id, text, text_ru FROM premises")}
+    return theories, bridges, contradictions, premises, tname, pname
 
 
 def _title(con, ids_json):
@@ -97,7 +105,7 @@ def _theory_bars(theories):
     return "".join(rows)
 
 
-def _bridge_graph(bridges):
+def _bridge_graph(bridges, tname):
     """Компактный круговой граф связей между теориями. Позиции считаем тут."""
     if not bridges:
         return "<p class='muted'>Пока нет накопленных связей между теориями.</p>"
@@ -109,10 +117,10 @@ def _bridge_graph(bridges):
     node_ids = [n for n, _ in sorted(deg.items(), key=lambda kv: -kv[1])][:14]
     idset = set(node_ids)
     edges = [b for b in bridges if b["src_theory_id"] in idset and b["dst_theory_id"] in idset]
-    labels = {b["src_theory_id"]: b["src_theory_id"] for b in bridges}  # fallback
-    # имена из theory_id: берём часть после 'th:'
+
     def nm(tid):
-        return tid.split("th:")[-1].replace("-", " ")
+        s = tname.get(tid) or tid.split("th:")[-1].replace("-", " ")
+        return s if len(s) <= 26 else s[:25] + "…"
     W, H, cx, cy, R = 680, 520, 340, 250, 185
     pos = {}
     n = len(node_ids)
@@ -140,7 +148,7 @@ def _bridge_graph(bridges):
     return "".join(svg)
 
 
-def _contradictions(con, contradictions):
+def _contradictions(con, contradictions, tname, pname):
     if not contradictions:
         return "<p class='muted'>Открытых противоречий нет.</p>"
     cards = []
@@ -148,11 +156,12 @@ def _contradictions(con, contradictions):
         forp = _title(con, c["for_papers"])
         againstp = _title(con, c["against_papers"])
         lvl = "посылка" if c["level"] == "premise" else "теория"
+        label = (pname.get(c["ref_id"]) if c["level"] == "premise" else tname.get(c["ref_id"])) or c["ref_label"]
         fa = "".join(f"<li>{_e(x)}</li>" for x in forp) or "<li class='muted'>—</li>"
         ag = "".join(f"<li>{_e(x)}</li>" for x in againstp) or "<li class='muted'>—</li>"
         cards.append(f"""
       <div class="ccard">
-        <div class="chead"><span class="ctag">{lvl}</span> {_e(c['ref_label'])}
+        <div class="chead"><span class="ctag">{lvl}</span> {_e(label)}
           <span class="cstr" title="сила противоречия 0..1">напряжённость {c['strength']:.2f}</span></div>
         <div class="csides">
           <div class="side for"><div class="slab">за ({len(forp)})</div><ul>{fa}</ul></div>
@@ -188,7 +197,7 @@ def _premises(premises):
 
 def render_html(con, out_dir):
     os.makedirs(out_dir, exist_ok=True)
-    theories, bridges, contradictions, premises = build_data(con)
+    theories, bridges, contradictions, premises, tname, pname = build_data(con)
     date = datetime.date.today().isoformat()
     n_theory = len([t for t in theories])
     n_contra = len(contradictions)
@@ -199,8 +208,8 @@ def render_html(con, out_dir):
         date=_e(date), n_theory=n_theory, n_papers=n_papers, n_contra=n_contra,
         n_bridges=len(bridges),
         theory_bars=_theory_bars(theories),
-        bridge_graph=_bridge_graph(bridges),
-        contradictions=_contradictions(con, contradictions),
+        bridge_graph=_bridge_graph(bridges, tname),
+        contradictions=_contradictions(con, contradictions, tname, pname),
         premises=_premises(premises),
     )
     path = os.path.join(out_dir, "graph.html")

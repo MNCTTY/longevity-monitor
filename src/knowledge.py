@@ -94,6 +94,8 @@ _MIGRATIONS = [
     ("theory_relation", "evidence_papers", "TEXT"),
     ("theories", "status", "TEXT DEFAULT 'canonical'"),
     ("premises", "status", "TEXT DEFAULT 'canonical'"),
+    ("theories", "name_ru", "TEXT"),
+    ("premises", "text_ru", "TEXT"),
 ]
 
 STANCES = ("supports", "challenges", "extends", "discusses", "mentions", "neutral")
