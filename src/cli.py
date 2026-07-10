@@ -20,7 +20,7 @@ import json
 import argparse
 import datetime
 
-from . import db, analysis, digest, knowledge, positioning, enrich, review, graph, translations
+from . import db, analysis, digest, knowledge, positioning, enrich, review, graph, translations, report
 from .sources.pubmed import PubMedSource
 from .sources.europepmc import EuropePmcSource
 from .sources.biorxiv import BiorxivSource
@@ -334,6 +334,13 @@ def cmd_graph(cfg, args):
     con.close()
 
 
+def cmd_theory_table(cfg, args):
+    con = db.connect(_dbpath(cfg))
+    path, nt, nl, nm = report.render_html(con, os.path.join(ROOT, cfg["paths"]["digests"]))
+    print(f"Theory-articles table: {path}  (теорий {nt}, связей {nl}, мультитеорийных статей {nm})")
+    con.close()
+
+
 def cmd_stats(cfg, args):
     con = db.connect(_dbpath(cfg))
     n = con.execute("SELECT COUNT(*) c FROM papers").fetchone()["c"]
@@ -384,6 +391,7 @@ def main():
     sub.add_parser("translate")
     sub.add_parser("digest")
     sub.add_parser("graph")
+    sub.add_parser("theory-table")
     sub.add_parser("stats")
     # Пытаемся переключить stdout на UTF-8 (для корректного вывода кириллицы в Windows).
     try:
@@ -402,7 +410,8 @@ def main():
         "autoposition": cmd_autoposition, "map-refresh": cmd_map_refresh,
         "review": cmd_review, "review-approve": cmd_review_approve, "review-reject": cmd_review_reject,
         "scorecard": cmd_scorecard, "contradictions": cmd_contradictions,
-        "translate": cmd_translate, "digest": cmd_digest, "graph": cmd_graph, "stats": cmd_stats,
+        "translate": cmd_translate, "digest": cmd_digest, "graph": cmd_graph,
+        "theory-table": cmd_theory_table, "stats": cmd_stats,
     }
     handlers[args.cmd](cfg, args)
 

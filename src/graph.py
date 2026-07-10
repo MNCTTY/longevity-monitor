@@ -81,26 +81,29 @@ def _title(con, ids_json):
 
 # ------------------------------------------------------------- компоненты ---
 def _theory_bars(theories):
-    """Дивержентные полосы: влево — вызовы (красное), вправо — поддержка (зелёное)."""
-    max_ev = max([1.0] + [(t["support_w"] or 0) + (t["challenge_w"] or 0) for t in theories])
+    """Дивержентные полосы: название целиком сверху, полоса снизу (влево — вызовы,
+    вправо — поддержка). Масштаб полос — по максимальной из сторон среди всех теорий."""
+    max_side = max([1.0] + [max(t["support_w"] or 0, t["challenge_w"] or 0) for t in theories])
     rows = []
     for t in theories[:18]:
         sup, chal = t["support_w"] or 0, t["challenge_w"] or 0
         node_status = "provisional" if t["node_status"] == "provisional" else t["status"]
         col = STATUS_COLOR.get(node_status, "#3b82f6")
-        sup_pct = sup / max_ev * 50
-        chal_pct = chal / max_ev * 50
+        sup_pct = sup / max_side * 100
+        chal_pct = chal / max_side * 100
         rows.append(f"""
-      <div class="row">
-        <div class="tname" title="{_e(t['name'])}">{_e(t['name'])}</div>
-        <div class="bar">
+      <div class="trow">
+        <div class="thead">
+          <span class="tname">{_e(t['name'])}</span>
+          <span class="pill" style="--c:{col}">{_e(STATUS_RU.get(node_status, node_status))}</span>
+          <span class="pcount">{t['n_papers']} ст.</span>
+        </div>
+        <div class="tbar">
           <div class="half left"><div class="fill chal" style="width:{chal_pct:.1f}%"></div></div>
           <div class="axis"></div>
           <div class="half right"><div class="fill sup" style="width:{sup_pct:.1f}%"></div></div>
+          <span class="nums"><span class="c">{chal:.1f}</span>&nbsp;/&nbsp;<span class="s">{sup:.1f}</span></span>
         </div>
-        <div class="nums"><span class="c">{chal:.1f}</span>&nbsp;/&nbsp;<span class="s">{sup:.1f}</span></div>
-        <div class="pill" style="--c:{col}">{_e(STATUS_RU.get(node_status, node_status))}</div>
-        <div class="pcount">{t['n_papers']}</div>
       </div>""")
     return "".join(rows)
 
@@ -246,22 +249,22 @@ _TEMPLATE = r"""<style>
   .chip span{{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}}
   .hint{{font-size:12px;color:var(--muted);margin:-4px 0 10px}}
 
-  /* Полосы теорий */
-  .row{{display:grid;grid-template-columns:190px 1fr 74px 108px 34px;align-items:center;gap:10px;
-        padding:5px 0;border-bottom:1px solid var(--line)}}
-  .tname{{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-  .bar{{display:flex;align-items:center;height:16px}}
-  .half{{width:50%;height:10px;display:flex}}
+  /* Полосы теорий (двухуровневые: название сверху, полоса снизу) */
+  .trow{{padding:9px 0;border-bottom:1px solid var(--line)}}
+  .thead{{display:flex;align-items:center;gap:10px;margin-bottom:6px}}
+  .tname{{font-size:13.5px;font-weight:600;flex:1;line-height:1.3}}
+  .tbar{{display:flex;align-items:center;gap:10px;height:14px}}
+  .half{{flex:1;height:10px;display:flex}}
   .half.left{{justify-content:flex-end}}
   .fill{{height:100%;border-radius:3px}}
   .fill.sup{{background:var(--sup)}}
   .fill.chal{{background:var(--chal)}}
-  .axis{{width:1px;height:16px;background:var(--line)}}
-  .nums{{font-size:12px;text-align:right;font-variant-numeric:tabular-nums}}
+  .axis{{width:1px;height:14px;background:var(--line)}}
+  .nums{{font-size:12px;width:74px;text-align:right;font-variant-numeric:tabular-nums;flex:none}}
   .nums .c{{color:var(--chal)}} .nums .s{{color:var(--sup)}}
   .pill{{font-size:11px;color:#fff;background:var(--c);border-radius:20px;padding:2px 9px;
-         text-align:center;justify-self:start;white-space:nowrap}}
-  .pcount{{font-size:12px;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}}
+         white-space:nowrap;flex:none}}
+  .pcount{{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;flex:none}}
 
   /* Граф мостов */
   .bridgesvg{{width:100%;height:auto;max-height:60vh;display:block;background:var(--panel);
