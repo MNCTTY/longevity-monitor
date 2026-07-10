@@ -332,13 +332,13 @@ def import_seed(con, seed):
         if summary:
             db.save_analysis(con, pid, summary, "", "", [], "curated")
         # Поле «основной теории» само может быть списком: первая = discusses, остальные = mentions.
-        main_ids = resolve_theory_list(con, r.get("What theory does the article discuss (mostly)?", ""), source="curated")
+        main_ids = resolve_theory_list(con, r.get("What theory does the article discuss (mostly)?", ""), source="paper-derived")
         main = main_ids[0] if main_ids else None
         seen = set()
         if main:
             link_paper_theory(con, pid, main, stance="discusses", source="curated")
             seen.add(main); stats["paper_theory_links"] += 1
-        others = main_ids[1:] + resolve_theory_list(con, r.get("What other theories of aging the article discuss (if any)?", ""), source="curated")
+        others = main_ids[1:] + resolve_theory_list(con, r.get("What other theories of aging the article discuss (if any)?", ""), source="paper-derived")
         for tid in others:
             if tid and tid not in seen:
                 link_paper_theory(con, pid, tid, stance="mentions", source="curated")

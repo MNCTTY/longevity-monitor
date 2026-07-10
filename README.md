@@ -79,7 +79,10 @@ longevity-monitor/
 │   ├── summarize.py            LLM-шаг: BatchSummarizer / AnthropicSummarizer
 │   ├── knowledge.py            граф знаний: схема, импорт seed, канонизация
 │   ├── positioning.py          позиционирование, накопление, противоречия
+│   ├── enrich.py               дотягивание реальных абстрактов curated (Europe PMC)
+│   ├── review.py               очередь ревью спорных узлов/связей
 │   ├── digest.py               рендер Markdown (дайджест + карта знаний)
+│   ├── graph.py                интерактивный HTML-граф карты знаний
 │   └── cli.py                  точка входа: все команды
 ├── data/                       (gitignored) база, seed, рабочие файлы
 │   └── seed/knowledge_seed.json  кураторская база (теории/посылки/статьи)
@@ -102,7 +105,10 @@ longevity-monitor/
 | `summarize.py` | суть статьи + `position()` (авто-режим), промпты | `anthropic` (опц.) | `cli` |
 | `knowledge.py` | KG-схема, `import_seed`, канонизация теорий/посылок, `kg_stats` | `db`, `models` | `cli`, `positioning` |
 | `positioning.py` | grounding, канонизация ссылок, веса, scorecard'ы, ledger, противоречия | `db`, `knowledge`, `similarity.tfidf` | `cli` |
+| `enrich.py` | реальные абстракты curated-статей по DOI/названию (Europe PMC) | `http` | `cli` |
+| `review.py` | очередь ревью: provisional/paper-derived узлы + needs_review связи | `db`, `knowledge`, `positioning` | `cli` |
 | `digest.py` | `render_markdown`, `render_knowledge_digest` | stdlib | `cli` |
+| `graph.py` | интерактивный force-directed HTML-граф (SVG+JS, самодостаточный) | `positioning` | `cli` |
 | `cli.py` | разбор команд, оркестрация конвейера | всё выше | пользователь |
 
 Правило зависимостей: `cli.py` — верхний слой, тянет всё; ниже —
@@ -172,6 +178,7 @@ python -m src.cli autoanalyze --limit 10      # авто (нужен ANTHROPIC_A
 
 # --- карта знаний ---
 python -m src.cli import-curated --reset      # засеять карту из seed
+python -m src.cli enrich-abstracts            # дотянуть реальные абстракты curated-статей (Europe PMC)
 python -m src.cli position-prepare --limit 0  # -> data/to_position.json (кандидаты)
 python -m src.cli position-import data/positioned.json
 python -m src.cli autoposition --limit 0      # авто (нужен ANTHROPIC_API_KEY)
@@ -180,8 +187,14 @@ python -m src.cli scorecard [theory]          # рейтинг теорий по
 python -m src.cli contradictions              # открытые противоречия
 python -m src.cli kg-stats
 
+# --- ревью спорных узлов/связей ---
+python -m src.cli review                       # очередь: provisional/paper-derived узлы + needs_review связи
+python -m src.cli review-approve <id|all>      # подтвердить (в карту)
+python -m src.cli review-reject  <id|all>      # отклонить (удалить, чистка фрагментации)
+
 # --- вывод ---
 python -m src.cli digest                      # digests/digest-DATE.md + knowledge-map-DATE.md
+python -m src.cli graph                       # digests/graph.html — интерактивный граф карты
 ```
 
 ---

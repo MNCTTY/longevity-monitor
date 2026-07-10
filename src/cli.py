@@ -20,7 +20,7 @@ import json
 import argparse
 import datetime
 
-from . import db, analysis, digest, knowledge, positioning
+from . import db, analysis, digest, knowledge, positioning, enrich, review, graph
 from .sources.pubmed import PubMedSource
 from .sources.europepmc import EuropePmcSource
 from .sources.biorxiv import BiorxivSource
@@ -255,6 +255,38 @@ def cmd_scorecard(cfg, args):
     con.close()
 
 
+def cmd_review(cfg, args):
+    con = db.connect(_dbpath(cfg))
+    review.refresh(con)
+    rows = review.list_pending(con)
+    if not rows:
+        print("Очередь ревью пуста.")
+    else:
+        print(f"На ревью ({len(rows)}):  approve → в карту, reject → удалить\n")
+        cur_kind = None
+        for r in rows:
+            if r["kind"] != cur_kind:
+                cur_kind = r["kind"]
+                print(f"[{cur_kind}]")
+            print(f"  #{r['review_id']:<4} {r['label']}")
+        print("\nПрименить: python -m src.cli review-approve <id|all> / review-reject <id|all>")
+    con.close()
+
+
+def cmd_review_approve(cfg, args):
+    con = db.connect(_dbpath(cfg))
+    n = review.decide(con, args.id, approve=True)
+    print(f"Подтверждено: {n}")
+    con.close()
+
+
+def cmd_review_reject(cfg, args):
+    con = db.connect(_dbpath(cfg))
+    n = review.decide(con, args.id, approve=False)
+    print(f"Отклонено (удалено): {n}")
+    con.close()
+
+
 def cmd_contradictions(cfg, args):
     con = db.connect(_dbpath(cfg))
     knowledge.ensure_schema(con)
@@ -268,6 +300,14 @@ def cmd_contradictions(cfg, args):
     con.close()
 
 
+def cmd_enrich_abstracts(cfg, args):
+    con = db.connect(_dbpath(cfg))
+    stats = enrich.enrich_curated(con, limit=args.limit)
+    print(f"Enriched abstracts: checked {stats['checked']}, updated {stats['updated']}, "
+          f"not found {stats['not_found']}")
+    con.close()
+
+
 def cmd_kg_stats(cfg, args):
     con = db.connect(_dbpath(cfg))
     s = knowledge.kg_stats(con)
@@ -277,6 +317,13 @@ def cmd_kg_stats(cfg, args):
     for name, sup, chal, total in s["theory_ranking"]:
         if total:
             print(f"  {name:42s}  {sup:3d} / {chal:3d} / {total:3d}")
+    con.close()
+
+
+def cmd_graph(cfg, args):
+    con = db.connect(_dbpath(cfg))
+    path, nn, nl = graph.render_html(con, os.path.join(ROOT, cfg["paths"]["digests"]))
+    print(f"Graph: {path}  ({nn} nodes, {nl} links)")
     con.close()
 
 
@@ -310,6 +357,8 @@ def main():
     ic.add_argument("file", nargs="?")
     ic.add_argument("--reset", action="store_true")
     sub.add_parser("kg-stats")
+    ea = sub.add_parser("enrich-abstracts")
+    ea.add_argument("--limit", type=int, default=0)
     pp = sub.add_parser("position-prepare")
     pp.add_argument("--limit", type=int, default=0)
     pi = sub.add_parser("position-import")
@@ -317,10 +366,16 @@ def main():
     apn = sub.add_parser("autoposition")
     apn.add_argument("--limit", type=int, default=0)
     sub.add_parser("map-refresh")
+    sub.add_parser("review")
+    ra = sub.add_parser("review-approve")
+    ra.add_argument("id")
+    rj = sub.add_parser("review-reject")
+    rj.add_argument("id")
     scp = sub.add_parser("scorecard")
     scp.add_argument("theory", nargs="?")
     sub.add_parser("contradictions")
     sub.add_parser("digest")
+    sub.add_parser("graph")
     sub.add_parser("stats")
     # Пытаемся переключить stdout на UTF-8 (для корректного вывода кириллицы в Windows).
     try:
@@ -334,10 +389,12 @@ def main():
         "init": cmd_init, "backfill": cmd_backfill, "run": cmd_run,
         "prepare": cmd_prepare, "import": cmd_import, "autoanalyze": cmd_autoanalyze,
         "import-curated": cmd_import_curated, "kg-stats": cmd_kg_stats,
+        "enrich-abstracts": cmd_enrich_abstracts,
         "position-prepare": cmd_position_prepare, "position-import": cmd_position_import,
         "autoposition": cmd_autoposition, "map-refresh": cmd_map_refresh,
+        "review": cmd_review, "review-approve": cmd_review_approve, "review-reject": cmd_review_reject,
         "scorecard": cmd_scorecard, "contradictions": cmd_contradictions,
-        "digest": cmd_digest, "stats": cmd_stats,
+        "digest": cmd_digest, "graph": cmd_graph, "stats": cmd_stats,
     }
     handlers[args.cmd](cfg, args)
 
